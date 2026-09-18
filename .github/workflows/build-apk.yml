@@ -80,7 +80,7 @@ jobs:
 
     steps:
       - name: Download scan candidate
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.3
         with:
           name: invoice-studio-apk-candidate
           path: candidate
