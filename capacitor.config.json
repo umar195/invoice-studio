@@ -1,0 +1,8 @@
+{
+  "appId": "com.hassan.invoices",
+  "appName": "Invoice Studio",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#EEF0F4"
+  }
+}
