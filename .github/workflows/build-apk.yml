@@ -130,19 +130,24 @@ jobs:
               "Signature update failed: $($_.Exception.Message)" | Add-Content $report
             }
 
+            $candidateDir = (Resolve-Path "candidate").Path
             $targets = @(
-              @{Name="apk"; Path=$apkPath},
-              @{Name="zip"; Path=$zipPath},
+              @{Name="candidate_dir_including_apk_and_zip"; Path=$candidateDir},
               @{Name="assets"; Path=$assetsPath}
             )
             foreach ($target in $targets) {
               "" | Add-Content $report
               "Scanning $($target.Name): $($target.Path)" | Add-Content $report
-              & $mpCmd -Scan -ScanType 3 -File $target.Path | Tee-Object -FilePath $report -Append | Out-Null
+              $scanOutput = & $mpCmd -Scan -ScanType 3 -File $target.Path 2>&1
+              $scanText = ($scanOutput | Out-String)
+              $scanText | Tee-Object -FilePath $report -Append | Out-Null
               $exitCode = $LASTEXITCODE
               "ExitCode: $exitCode" | Add-Content $report
               if ($exitCode -ne 0 -and $status -eq "clean") {
                 $status = "detected"
+              }
+              if ($scanText -match "was skipped" -and $status -eq "clean") {
+                $status = "scan_incomplete"
               }
             }
           }
