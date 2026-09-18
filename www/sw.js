@@ -24,11 +24,34 @@ self.addEventListener("activate", e => {
 /* cache first, then network; anything fetched gets kept for next time */
 self.addEventListener("fetch", e => {
   if(e.request.method !== "GET") return;
+  const url = new URL(e.request.url);
+  if(url.origin !== self.location.origin) return;
+
+  if(e.request.mode === "navigate"){
+    e.respondWith(
+      fetch(e.request)
+        .then(res => {
+          if(res && res.ok){
+            const copy = res.clone();
+            caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(() => caches.match(e.request).then(hit => hit || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  const isStaticAsset = /\.(?:js|css|json|png|jpg|jpeg|svg|webp|ico)$/i.test(url.pathname);
+  if(!isStaticAsset) return;
+
   e.respondWith(
     caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      if(res && res.ok && res.type === "basic"){
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      }
       return res;
-    }).catch(() => caches.match("./index.html")))
+    }))
   );
 });

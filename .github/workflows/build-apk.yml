@@ -1,58 +1,181 @@
-name: Build APK
+name: Build and Verify APK
 
-# Har push pe chalega, aur Actions tab se hath se bhi chala sakte ho
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  android:
+  build-apk:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
-      - name: Code lo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Node lagao
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
-      - name: Java lagao
-        uses: actions/setup-java@v4
+      - name: Setup Java
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
 
-      - name: Packages install karo
-        run: npm install
+      - name: Install dependencies (locked)
+        run: npm ci
 
-      - name: Android project banao
+      - name: Dependency audit (runtime)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Create Android project
         run: npx cap add android
 
-      - name: Icon aur splash lagao
-        run: npx @capacitor/assets generate --android || echo "assets skip"
-
-      - name: Web files copy karo
+      - name: Sync web assets
         run: npx cap sync android
 
-      - name: APK build karo
+      - name: Build debug APK
         run: |
           chmod +x android/gradlew
           cd android
           ./gradlew assembleDebug --no-daemon
 
-      - name: APK yahan rakh do
+      - name: Verify bundled asset provenance
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          mkdir -p /tmp/apk-unpacked
+          unzip -q "$APK" assets/native-bridge.js assets/public/sw.js -d /tmp/apk-unpacked
+          cmp -s /tmp/apk-unpacked/assets/native-bridge.js node_modules/@capacitor/android/capacitor/src/main/assets/native-bridge.js
+          cmp -s /tmp/apk-unpacked/assets/public/sw.js www/sw.js
+
+      - name: Create hash and candidate zip
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/app-debug.apk
+          sha256sum dist/app-debug.apk | tee dist/app-debug.apk.sha256
+          (cd dist && zip -q invoice-studio-apk.zip app-debug.apk app-debug.apk.sha256)
+
+      - name: Upload scan candidate
         uses: actions/upload-artifact@v4
         with:
-          name: invoice-studio-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: invoice-studio-apk-candidate
+          path: dist/
           if-no-files-found: error
 
-      # Tag push karo (jaise v1.0.0) to APK Releases page pe bhi chali jayegi
-      - name: Release pe bhejo
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  windows-defender-scan:
+    needs: build-apk
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download scan candidate
+        uses: actions/download-artifact@v4
         with:
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          name: invoice-studio-apk-candidate
+          path: candidate
+
+      - name: Scan APK with Microsoft Defender
+        id: defender
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $status = "clean"
+          $reportDir = Join-Path $env:RUNNER_TEMP "defender-report"
+          New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+          $report = Join-Path $reportDir "defender-scan-report.txt"
+          "Windows Defender scan report (invoice-studio)" | Set-Content $report
+          "UTC: $(Get-Date -Format o)" | Add-Content $report
+          "" | Add-Content $report
+
+          $apkPath = (Resolve-Path "candidate/app-debug.apk").Path
+          $zipPath = (Resolve-Path "candidate/invoice-studio-apk.zip").Path
+          $shaPath = (Resolve-Path "candidate/app-debug.apk.sha256").Path
+          $expandedRoot = Join-Path $env:RUNNER_TEMP "apk-expanded"
+          if (Test-Path $expandedRoot) { Remove-Item $expandedRoot -Recurse -Force }
+          New-Item -ItemType Directory -Path $expandedRoot | Out-Null
+          Copy-Item $apkPath (Join-Path $expandedRoot "app-debug.zip")
+          Expand-Archive -Path (Join-Path $expandedRoot "app-debug.zip") -DestinationPath (Join-Path $expandedRoot "app-debug") -Force
+          $assetsPath = Join-Path $expandedRoot "app-debug/assets"
+
+          $sigLine = (Get-Content $shaPath | Select-Object -First 1)
+          "APK SHA256: $sigLine" | Add-Content $report
+
+          $candidatePaths = @(
+            (Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe")
+          )
+          $platformPaths = Get-ChildItem -Path (Join-Path $env:ProgramData "Microsoft\Windows Defender\Platform") -Filter "MpCmdRun.exe" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          if ($platformPaths) { $candidatePaths += $platformPaths }
+          $mpCmd = $candidatePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $mpCmd) {
+            $status = "unavailable"
+            "Scanner status: Microsoft Defender CLI unavailable on this runner." | Add-Content $report
+          } else {
+            "Scanner: $mpCmd" | Add-Content $report
+            try {
+              & $mpCmd -SignatureUpdate | Tee-Object -FilePath $report -Append | Out-Null
+            } catch {
+              if ($status -eq "clean") { $status = "scan_error" }
+              "Signature update failed: $($_.Exception.Message)" | Add-Content $report
+            }
+
+            $targets = @(
+              @{Name="apk"; Path=$apkPath},
+              @{Name="zip"; Path=$zipPath},
+              @{Name="assets"; Path=$assetsPath}
+            )
+            foreach ($target in $targets) {
+              "" | Add-Content $report
+              "Scanning $($target.Name): $($target.Path)" | Add-Content $report
+              & $mpCmd -Scan -ScanType 3 -File $target.Path | Tee-Object -FilePath $report -Append | Out-Null
+              $exitCode = $LASTEXITCODE
+              "ExitCode: $exitCode" | Add-Content $report
+              if ($exitCode -ne 0 -and $status -eq "clean") {
+                $status = "detected"
+              }
+            }
+          }
+
+          $safeReport = Join-Path $reportDir "defender-scan-report-sanitized.txt"
+          $sanitized = (Get-Content $report -Raw)
+          $sanitized = $sanitized -replace [Regex]::Escape($env:RUNNER_TEMP), "[runner-temp]"
+          $sanitized = $sanitized -replace [Regex]::Escape($env:USERPROFILE), "[user-profile]"
+          Set-Content -Path $safeReport -Value $sanitized
+
+          "scan_status=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "report_dir=$reportDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoice-studio-scan-evidence
+          path: ${{ steps.defender.outputs.report_dir }}
+          if-no-files-found: error
+
+      - name: Upload verified APK package
+        if: steps.defender.outputs.scan_status == 'clean'
+        uses: actions/upload-artifact@v4
+        with:
+          name: invoice-studio-apk-verified
+          path: candidate/
+          if-no-files-found: error
+
+      - name: Fail when scan is not clean
+        if: steps.defender.outputs.scan_status != 'clean'
+        shell: bash
+        run: |
+          echo "Defender scan status: ${{ steps.defender.outputs.scan_status }}"
+          echo "APK is not published as verified when scan is unavailable or non-clean."
+          exit 1

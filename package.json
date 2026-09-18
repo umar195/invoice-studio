@@ -4,11 +4,10 @@
   "private": true,
   "description": "Invoice maker that sends straight to WhatsApp",
   "dependencies": {
-    "@capacitor/android": "^7.0.0",
-    "@capacitor/core": "^7.0.0"
+    "@capacitor/android": "7.6.9",
+    "@capacitor/core": "7.6.9"
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5",
-    "@capacitor/cli": "^7.0.0"
+    "@capacitor/cli": "7.6.9"
   }
 }

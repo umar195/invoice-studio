@@ -452,7 +452,43 @@ function evalNum(str){
   let s = String(str).replace(/[^0-9+\-*/().\s]/g,"").replace(/[+\-*/.\s]+$/,"").trim();
   if(!s) return 0;
   if(/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
-  try{ const v = Function('"use strict";return (' + s + ')')(); return isFinite(v) ? v : 0; }catch(e){ return 0; }
+  if(!/^[\d+\-*/().\s]+$/.test(s)) return 0;
+  const tokens = s.match(/\d*\.?\d+|[()+\-*/]/g);
+  if(!tokens) return 0;
+  const vals = [], ops = [];
+  const prec = op => (op === "+" || op === "-") ? 1 : (op === "*" || op === "/") ? 2 : 0;
+  const apply = () => {
+    if(vals.length < 2 || ops.length < 1) return false;
+    const b = vals.pop(), a = vals.pop(), op = ops.pop();
+    if(op === "/" && b === 0) return false;
+    const out = op === "+" ? a + b : op === "-" ? a - b : op === "*" ? a * b : a / b;
+    if(!isFinite(out)) return false;
+    vals.push(out);
+    return true;
+  };
+  for(let i = 0; i < tokens.length; i++){
+    const t = tokens[i];
+    if(/^\d*\.?\d+$/.test(t)){ vals.push(parseFloat(t)); continue; }
+    if(t === "("){ ops.push(t); continue; }
+    if(t === ")"){
+      while(ops.length && ops[ops.length - 1] !== "("){ if(!apply()) return 0; }
+      if(ops.pop() !== "(") return 0;
+      continue;
+    }
+    if("+-*/".includes(t)){
+      if(t === "-" && (i === 0 || "()+-*/".includes(tokens[i - 1]))) vals.push(0);
+      while(ops.length && prec(ops[ops.length - 1]) >= prec(t)){ if(!apply()) return 0; }
+      ops.push(t);
+      continue;
+    }
+    return 0;
+  }
+  while(ops.length){
+    if(ops[ops.length - 1] === "(") return 0;
+    if(!apply()) return 0;
+  }
+  const v = vals.length === 1 ? vals[0] : 0;
+  return isFinite(v) ? v : 0;
 }
 function money(v){
   const d = settings.round ? 0 : 2;
